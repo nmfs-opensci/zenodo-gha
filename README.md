@@ -36,7 +36,7 @@ jobs:
 
 ## Existing Release (has DOI on Zenodo)
 
-Edit your `zenodo.yml` file and add the `doi: ` line. Make sure it is the parent DOI or the "cite all versions by using the DOI". Now when you make releases, they will be added to the Zenodo record.
+Edit your `.github/workflows/zenodo.yml` file and add the `doi: ` line. Go to Zenodo to your archive for the your first release (above). Make sure it is the parent DOI shown on Zenodo called the "cite all versions by using the DOI". Now when you make releases, they will be added to the Zenodo record.
 
 ```
 name: Zenodo Release
