@@ -1,18 +1,15 @@
 # Zenodo Action
-This is a variant of [zenodo-release](https://github.com/rseng/zenodo-release) Copyright © 2022, Vanessa Sochat. This variant is focused specifically on creating a Zenodo release when a GitHub release is made so I moved some of set-up into `action.yml` because this is only triggered by GitHub releases.
+This is a variant of [zenodo-release](https://github.com/rseng/zenodo-release) Copyright © 2022, Vanessa Sochat. This variant focuses on creating a Zenodo release when a GitHub release is published. There is an option to manually run the Action (a workflow_dispath) but should only be used in situations where the GHA failed to complete after publishing the release.
 
-This is a GitHub Action to allow you to automatically update a package on Zenodo
-when a GitHub release is created, and without needing to enable admin webhooks. To get this working you will need to:
+This GitHub Action will automatically publish a new archive/package or update an existing archive/package on Zenodo when a GitHub release is created, and without needing to enable admin webhooks. To get this working you will need to:
 
 1. Log into Zenodo
 2. Under your name -> Applications -> Developer Applications -> Personal Access Tokens, create a new token and choose both scopes for deposit
 3. Add the token to your GitHub repository secrets as `ZENODO_TOKEN`. Settings > Secrets > Actions > Repository Secret
 4. Create a .zenodo.json file (or CITATION.cff) in the root of your repository (see [template](.zenodo.json))
-5. Add the example GitHub Action below to your GitHub repository in the `.github/workflows` directory before your first release and use the 'New Release' instructions. Alternatively, create a release manually on Zenodo and use the 'Existing Release' instructions.
-
-## New Release (no DOI)
-
-If you have no entry on Zenodo yet, then create a `zenodo.yml` file in the `.github/workflows` directory and copy this code into that file. Then make a GitHub release to trigger the GitHub Action. You can see if it worked by going to the Actions tab. Then go to Zenodo and look up what DOI it created. Copy the parent DOI (all versions DOI).
+5. Add the example GitHub Action below to your GitHub repository in the `.github/workflows` directory before your first release.
+6. Once the archive is created on Zenodo (or if the archive already exists), you'll want to update your action to include the **parent** DOI (in the form "##.####/zenodo.#####") as environment variable `ZENODOD_DOI`
+## GitHub Action
 
 ```
 name: Zenodo Release
@@ -20,43 +17,86 @@ name: Zenodo Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Tag of the published release to deploy
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
+    env:
+      # Leave blank for the first deposit; set to the Zenodo parent/concept DOI afterward.
+      ZENODO_DOI: ""
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+
     - name: Run Zenodo Deploy
+      if: github.event_name == 'release'
       uses: nmfs-opensci/zenodo-gha@main
       with:
         token: ${{ secrets.ZENODO_TOKEN }}
-        zenodo_json: .zenodo.json   # either a .zenodo.json file or CITATION.cff
-```
+        zenodo_json: CITATION.cff
+        doi: ${{ env.ZENODO_DOI }}
 
-## Existing Release (has DOI on Zenodo)
+    - name: Get published release archive and metadata
+      if: github.event_name == 'workflow_dispatch'
+      id: release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")
+        tag=$(jq -er '.tag_name | select(length > 0)' <<< "$release")
+        archive_url=$(jq -er '.zipball_url | select(length > 0)' <<< "$release")
+        html_url=$(jq -er '.html_url | select(length > 0)' <<< "$release")
+        release_name=$(jq -r '.name // .tag_name' <<< "$release")
+        release_body=$(jq -r '.body // ""' <<< "$release")
 
-Edit your `.github/workflows/zenodo.yml` file and add the `doi: ` line. Go to Zenodo to your archive for the your first release (above). Make sure it is the parent DOI shown on Zenodo called the "cite all versions by using the DOI". Now when you make releases, they will be added to the Zenodo record.
+        curl --fail --location --retry 3 --silent --show-error \
+          --header "Authorization: Bearer ${GH_TOKEN}" \
+          --header "Accept: application/vnd.github+json" \
+          "$archive_url" --output zenodo-release.zip
 
-```
-name: Zenodo Release
+        printf '## Release Name: %s\n' "$release_name" > body.txt
+        printf '%s\n' "$release_body" >> body.txt
+        printf 'version=%s\nhtml_url=%s\n' "$tag" "$html_url" >> "$GITHUB_OUTPUT"
 
-on:
-  release:
-    types: [published]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-20.04
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: Run Zenodo Deploy
-      uses: nmfs-opensci/zenodo-gha@main
+    - name: Check out Zenodo deployment script
+      if: github.event_name == 'workflow_dispatch'
+      uses: actions/checkout@v7
       with:
-        token: ${{ secrets.ZENODO_TOKEN }}
-        zenodo_json: .zenodo.json   # either a .zenodo.json file or CITATION.cff
-        doi: 10.5281/zenodo.10811321 # update with your DOI
+        repository: nmfs-opensci/zenodo-gha
+        ref: main
+        path: .github/zenodo-gha
+
+    - name: Convert citation metadata and install deployment dependencies
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        pip install --user cffconvert markdown requests
+        cffconvert -f zenodo > zenodo.json
+
+    - name: Deploy published release to Zenodo
+      if: github.event_name == 'workflow_dispatch'
+      env:
+        VERSION: ${{ steps.release.outputs.version }}
+        HTML_URL: ${{ steps.release.outputs.html_url }}
+        ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+        ZENODO_DOI: ${{ env.ZENODO_DOI }}
+      run: |
+        args=(zenodo-release.zip --version "$VERSION" --html-url "$HTML_URL" --zenodo-json zenodo.json)
+        if [[ -n "$ZENODO_DOI" ]]; then
+          args+=(--doi "$ZENODO_DOI")
+        fi
+        python .github/zenodo-gha/scripts/deploy.py upload "${args[@]}"
 ```
 
 ## Customizing your Zenodo entry infomation
